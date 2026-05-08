@@ -175,8 +175,8 @@ class DevinCollector:
                     [rec["session_id"], rec.get("status", "unknown")],
                     (updated - created).total_seconds(),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("duration_metric_parse_failed", session_id=rec.get("session_id"), error=str(e))
         yield duration_family
 
         pr_count = sum(

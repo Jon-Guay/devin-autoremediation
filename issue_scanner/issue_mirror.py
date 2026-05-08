@@ -11,21 +11,35 @@ log = structlog.get_logger()
 
 FORK_REPO = os.environ["GITHUB_FORK_REPO"]
 SAFE_LABELS = {"bug", "enhancement", "documentation"}
+SOURCE_REPO_PREFIX = "https://github.com/apache/superset/issues/"
+
+
+async def _get_already_mirrored() -> set[str]:
+    """Single search to find all upstream URLs already mirrored to the fork."""
+    results = await github_client.search_issues_in_repo(
+        FORK_REPO,
+        f'in:body "Source: {SOURCE_REPO_PREFIX}"',
+        per_page=100,
+    )
+    mirrored: set[str] = set()
+    for item in results:
+        for line in (item.get("body") or "").splitlines():
+            if "**Source:**" in line:
+                url = line.split("**Source:**", 1)[-1].strip()
+                if url.startswith("https://"):
+                    mirrored.add(url)
+    return mirrored
 
 
 async def mirror_issues(issues: list[ScoredIssue]) -> list[MirroredIssue]:
+    already_mirrored = await _get_already_mirrored()
+    log.info("mirror_idempotency_check", already_mirrored_count=len(already_mirrored))
+
     mirrored: list[MirroredIssue] = []
 
     for issue in issues:
-        existing = await github_client.search_issues_in_repo(
-            FORK_REPO, f'in:body "Source: {issue.html_url}"'
-        )
-        if existing:
-            log.info(
-                "issue_already_mirrored",
-                upstream_number=issue.number,
-                fork_number=existing[0]["number"],
-            )
+        if issue.html_url in already_mirrored:
+            log.info("issue_already_mirrored", upstream_number=issue.number)
             continue
 
         body = (

@@ -22,6 +22,14 @@ FORK_REPO = os.getenv("GITHUB_FORK_REPO", "")
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 TERMINAL_STATUSES = {"finished", "blocked", "expired"}
 
+_github_http = httpx.AsyncClient(
+    timeout=30,
+    headers={
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    },
+)
+
 # In-flight lock: issue numbers currently being processed.
 # Prevents a race between the store.get() check and store.save() across
 # concurrent webhook calls for the same issue.
@@ -36,22 +44,17 @@ def _verify_signature(body: bytes, signature: str) -> bool:
 
 
 async def _fetch_github_issue(issue_number: int) -> GitHubIssue:
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(
-            f"https://api.github.com/repos/{FORK_REPO}/issues/{issue_number}",
-            headers={
-                "Authorization": f"token {GITHUB_TOKEN}",
-                "Accept": "application/vnd.github.v3+json",
-            },
-        )
-        r.raise_for_status()
-        data = r.json()
-        return GitHubIssue(
-            number=data["number"],
-            title=data["title"],
-            body=data.get("body") or "",
-            html_url=data["html_url"],
-        )
+    r = await _github_http.get(
+        f"https://api.github.com/repos/{FORK_REPO}/issues/{issue_number}"
+    )
+    r.raise_for_status()
+    data = r.json()
+    return GitHubIssue(
+        number=data["number"],
+        title=data["title"],
+        body=data.get("body") or "",
+        html_url=data["html_url"],
+    )
 
 
 async def _trigger_devin(issue_number: int, issue_url: str) -> None:
@@ -69,7 +72,7 @@ async def _trigger_devin(issue_number: int, issue_url: str) -> None:
         issue = await _fetch_github_issue(issue_number)
         # Layer 3: Devin idempotent=True handles any duplicates that slip through
         session = await devin_client.create_session(issue)
-        store.save(issue_number, issue_url, session.session_id, session.url)
+        await store.save(issue_number, issue_url, session.session_id, session.url)
         log.info(
             "devin_triggered",
             issue_number=issue_number,
@@ -131,7 +134,7 @@ async def poll_sessions() -> None:
                 pr_url = (
                     status.pull_request.get("url") if status.pull_request else None
                 )
-                store.update_status(rec.session_id, status.status_enum, pr_url)
+                await store.update_status(rec.session_id, status.status_enum, pr_url)
                 log.info(
                     "session_status_updated",
                     session_id=rec.session_id,

@@ -58,26 +58,37 @@ async def score_issues(issues: list[RawIssue], top_n: int = 5) -> list[ScoredIss
         ],
     )
 
+    if not message.content:
+        log.error("ai_filter_empty_response")
+        return []
+
     raw = message.content[0].text.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
 
-    scores_data: list[dict] = json.loads(raw)
-    score_map = {item["number"]: item for item in scores_data}
+    try:
+        scores_data: list[dict] = json.loads(raw)
+    except json.JSONDecodeError as e:
+        log.error("ai_filter_json_parse_failed", error=str(e), raw_preview=raw[:300])
+        return []
 
     scored: list[ScoredIssue] = []
     for issue in issues:
-        if issue.number in score_map:
-            item = score_map[issue.number]
+        match = next((s for s in scores_data if s.get("number") == issue.number), None)
+        if not match:
+            continue
+        try:
             scored.append(
                 ScoredIssue(
                     **issue.model_dump(),
-                    ai_score=float(item["score"]),
-                    ai_reasoning=item["reasoning"],
+                    ai_score=float(match["score"]),
+                    ai_reasoning=match["reasoning"],
                 )
             )
+        except (KeyError, ValueError) as e:
+            log.warning("ai_filter_score_parse_failed", issue_number=issue.number, error=str(e))
 
     scored.sort(key=lambda x: x.ai_score, reverse=True)
     result = scored[:top_n]

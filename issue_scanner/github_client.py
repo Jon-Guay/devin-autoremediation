@@ -99,12 +99,12 @@ async def create_issue(repo: str, title: str, body: str, labels: list[str]) -> d
         return r.json()
 
 
-async def search_issues_in_repo(repo: str, query: str) -> list[dict]:
+async def search_issues_in_repo(repo: str, query: str, per_page: int = 5) -> list[dict]:
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(
             f"{BASE_URL}/search/issues",
             headers=HEADERS,
-            params={"q": f"repo:{repo} {query}", "per_page": 5},
+            params={"q": f"repo:{repo} {query}", "per_page": per_page},
         )
         r.raise_for_status()
         return r.json().get("items", [])

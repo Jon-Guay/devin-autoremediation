@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -32,6 +33,8 @@ class SessionStore:
         if SESSION_STORE_PATH.exists():
             try:
                 data = json.loads(SESSION_STORE_PATH.read_text())
+                if not isinstance(data, list):
+                    raise ValueError("sessions.json root must be a list")
                 for item in data:
                     rec = SessionRecord.model_validate(item)
                     self._sessions[rec.issue_number] = rec
@@ -39,7 +42,7 @@ class SessionStore:
             except Exception as e:
                 log.warning("session_store_load_failed", error=str(e))
 
-    def _persist(self) -> None:
+    def _write(self) -> None:
         SESSION_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = SESSION_STORE_PATH.with_suffix(".tmp")
         tmp.write_text(
@@ -49,7 +52,10 @@ class SessionStore:
         )
         tmp.rename(SESSION_STORE_PATH)
 
-    def save(
+    async def _persist(self) -> None:
+        await asyncio.to_thread(self._write)
+
+    async def save(
         self, issue_number: int, issue_url: str, session_id: str, session_url: str
     ) -> SessionRecord:
         now = datetime.now(timezone.utc)
@@ -62,7 +68,7 @@ class SessionStore:
             updated_at=now,
         )
         self._sessions[issue_number] = rec
-        self._persist()
+        await self._persist()
         return rec
 
     def get(self, issue_number: int) -> Optional[SessionRecord]:
@@ -71,7 +77,7 @@ class SessionStore:
     def get_all(self) -> list[SessionRecord]:
         return list(self._sessions.values())
 
-    def update_status(
+    async def update_status(
         self, session_id: str, status: str, pr_url: Optional[str] = None
     ) -> None:
         for rec in self._sessions.values():
@@ -80,5 +86,5 @@ class SessionStore:
                 rec.updated_at = datetime.now(timezone.utc)
                 if pr_url:
                     rec.pr_url = pr_url
-                self._persist()
+                await self._persist()
                 return

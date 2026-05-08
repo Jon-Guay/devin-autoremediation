@@ -6,26 +6,26 @@ import httpx
 DEVIN_API_KEY = os.environ["DEVIN_API_KEY"]
 BASE_URL = "https://api.devin.ai/v1"
 V3_BASE_URL = "https://api.devin.ai/v3"
-HEADERS = {"Authorization": f"Bearer {DEVIN_API_KEY}"}
+
+_http = httpx.AsyncClient(
+    timeout=30,
+    headers={"Authorization": f"Bearer {DEVIN_API_KEY}"},
+)
 
 
 async def list_sessions() -> list[dict]:
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{BASE_URL}/sessions", headers=HEADERS)
-        r.raise_for_status()
-        return r.json().get("sessions", [])
+    r = await _http.get(f"{BASE_URL}/sessions")
+    r.raise_for_status()
+    return r.json().get("sessions", [])
 
 
 async def _v3_get(path: str, params: dict) -> Optional[dict]:
     """GET a v3 enterprise endpoint; returns None on 401/403 (insufficient permissions)."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(
-            f"{V3_BASE_URL}/{path}", headers=HEADERS, params=params
-        )
-        if r.status_code in (401, 403):
-            return None
-        r.raise_for_status()
-        return r.json()
+    r = await _http.get(f"{V3_BASE_URL}/{path}", params=params)
+    if r.status_code in (401, 403):
+        return None
+    r.raise_for_status()
+    return r.json()
 
 
 async def get_usage_metrics(time_after: int, time_before: int) -> Optional[dict]:
