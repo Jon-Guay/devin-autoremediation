@@ -1,0 +1,47 @@
+networks:
+  autoremediation-net:
+    driver: bridge
+
+volumes:
+  session-data:
+
+services:
+
+  issue_scanner:
+    build: ./issue_scanner
+    profiles: ["scan"]
+    env_file: .env
+    networks: [autoremediation-net]
+
+  webhook_server:
+    build: ./webhook_server
+    restart: always
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - session-data:/data
+    networks: [autoremediation-net]
+
+  devin_exporter:
+    build: ./devin_exporter
+    restart: always
+    env_file: .env
+    ports:
+      - "9090:9090"
+    volumes:
+      - session-data:/data
+    networks: [autoremediation-net]
+
+  alloy:
+    image: grafana/alloy:latest
+    restart: always
+    env_file: .env
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: run /etc/alloy/config.alloy
+    networks: [autoremediation-net]
+    depends_on:
+      - devin_exporter
+      - webhook_server

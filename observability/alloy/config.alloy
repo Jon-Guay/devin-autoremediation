@@ -1,0 +1,42 @@
+// ─── Prometheus metrics scrape ───────────────────────────────────────────────
+// Scrapes devin_exporter and forwards to Grafana Cloud Prometheus
+prometheus.scrape "devin_exporter" {
+  targets = [{"__address__" = "devin_exporter:9090"}]
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+  scrape_interval = "30s"
+}
+
+// ─── Remote write to Grafana Cloud Prometheus ────────────────────────────────
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_PROMETHEUS_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_PROMETHEUS_USERNAME")
+      password = sys.env("GRAFANA_CLOUD_API_KEY")
+    }
+  }
+}
+
+// ─── Docker container log collection ─────────────────────────────────────────
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.docker.containers.targets
+  forward_to = [loki.write.grafana_cloud.receiver]
+}
+
+// ─── Remote write to Grafana Cloud Loki ──────────────────────────────────────
+loki.write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_LOKI_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_LOKI_USERNAME")
+      password = sys.env("GRAFANA_CLOUD_API_KEY")
+    }
+  }
+}
