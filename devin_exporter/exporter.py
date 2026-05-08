@@ -134,7 +134,7 @@ class DevinCollector:
 
         pending_family = GaugeMetricFamily(
             "devin_pending_issues_total",
-            "Open fork issues without an active Devin session",
+            "Open fork issues without an active Devin session (observability only — alert trigger is GitHub datasource)",
             labels=["issue_number", "issue_url"],
         )
         for issue in open_issues:
