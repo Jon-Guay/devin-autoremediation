@@ -46,6 +46,11 @@ class _Cache:
     session_metrics: Optional[dict] = None
     pr_metrics: Optional[dict] = None
     daily_consumption: Optional[dict] = None
+    # Tracks previous (title, status, status_detail) per session so we can
+    # emit value=0 for stale label combos before Prometheus marks them stale.
+    # Without this, Grafana's 5-minute instant-query lookback surfaces both
+    # the old and new series simultaneously, causing duplicate table rows.
+    prev_status_info: dict[str, tuple[str, str, str]] = {}
 
 
 _cache = _Cache()
@@ -209,19 +214,36 @@ class DevinCollector:
         # Info-style gauge: value=1, strings carried in labels.
         # status comes from known_sessions (polled every 10s via individual endpoints — accurate).
         # status_detail comes from the API list (refreshed every 60s — best-effort).
+        #
+        # When labels change (status_detail update or status transition), we emit
+        # the old label combination with value=0 for one scrape cycle. This lets
+        # Prometheus record an explicit 0 rather than relying on staleness markers,
+        # so Grafana's 5-minute instant-query lookback doesn't surface both old and
+        # new series simultaneously (which causes duplicate table rows).
         status_info_family = GaugeMetricFamily(
             "devin_session_status_info",
             "Current status detail for each Devin session (scoped to current demo run)",
             labels=["session_id", "title", "status", "status_detail"],
         )
+        current_status_info: dict[str, tuple[str, str, str]] = {}
+        known_ids_set = {rec["session_id"] for rec in known}
         for rec in known:
-            meta = session_meta.get(rec["session_id"], {})
+            sid = rec["session_id"]
+            meta = session_meta.get(sid, {})
             title = meta.get("title") or f"issue #{rec.get('issue_number', '?')}"
+            status = rec.get("status", "unknown")
             status_detail = meta.get("status_detail") or "unknown"
-            status_info_family.add_metric(
-                [rec["session_id"], title, rec.get("status", "unknown"), status_detail],
-                1.0,
-            )
+            current_status_info[sid] = (title, status, status_detail)
+            prev = _cache.prev_status_info.get(sid)
+            if prev and prev != (title, status, status_detail):
+                status_info_family.add_metric([sid, prev[0], prev[1], prev[2]], 0.0)
+            status_info_family.add_metric([sid, title, status, status_detail], 1.0)
+        # Purge entries for sessions no longer in the store (e.g. after reset)
+        _cache.prev_status_info = {
+            sid: combo
+            for sid, combo in {**_cache.prev_status_info, **current_status_info}.items()
+            if sid in known_ids_set
+        }
         yield status_info_family
 
         pr_info_family = GaugeMetricFamily(
