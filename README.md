@@ -114,10 +114,49 @@ docker compose logs -f webhook_server
 docker compose logs -f devin_exporter
 ```
 
+## Testing
+
+Automated tests live under `tests/` and mock GitHub and Devin HTTP calls (no real tokens or network required for those cases). They target **`webhook_server`** only: `tests/conftest.py` sets dummy env vars and a temporary `SESSION_STORE_PATH`, and **`respx`** stubs outbound HTTP.
+
+What they cover:
+
+- **`GET /health`** returns OK.
+- **`POST /webhook`** with no `firing` Grafana alerts does not call GitHub or Devin.
+- Invalid JSON body yields **400**; invalid webhook signature (when a secret is enforced in the test) yields **401**.
+- A **`firing`** alert triggers one mocked GitHub issues fetch and one mocked Devin session create; **`GET /sessions`** reflects the saved issue.
+- A second webhook for the same issue does **not** create a second Devin session (idempotency via the session store).
+
+Use a **virtual environment** so `pip` does not touch system Python (avoids `externally-managed-environment` on Debian/Ubuntu/WSL):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r webhook_server/requirements.txt -r requirements-dev.txt
+python -m pytest -c tests/pytest.ini -v
+```
+
+If `python3 -m venv` fails, install the venv package (e.g. `sudo apt install python3-venv`) and retry.
+
+Configuration lives in **`tests/pytest.ini`** (`pythonpath` points at `webhook_server/` so imports match the Docker layout). Using **`-c tests/pytest.ini`** sets pytest’s root to `tests/` so paths stay consistent from the repo root.
+
+Alternatively, from **`tests/`**:
+
+```bash
+cd tests && python -m pytest -v
+```
+
+To run a single file or test from the repo root:
+
+```bash
+python -m pytest -c tests/pytest.ini tests/test_webhook.py -v
+python -m pytest -c tests/pytest.ini tests/test_webhook.py::test_webhook_firing_triggers_devin_for_open_issues -v
+```
+
 ## Troubleshooting
 
 | Problem | Check |
 |---------|-------|
+| `externally-managed-environment` when using pip | Create and activate a **venv** (see **Testing**); do not install into system Python. |
 | No metrics in Grafana | `curl localhost:9090/metrics` — check Alloy logs: `docker compose logs alloy` |
 | Webhook not triggering | Verify ngrok URL in Grafana contact point; check `docker compose logs webhook_server` |
 | No issues mirrored | Check scanner logs: `docker compose --profile scan logs issue_scanner`; verify `GITHUB_TOKEN` has fork write access |
