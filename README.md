@@ -1,73 +1,146 @@
 # devin-autoremediation
 
-An event-driven pipeline that automatically identifies good candidate issues from [apache/superset](https://github.com/apache/superset), mirrors them to a fork, triggers [Devin.ai](https://devin.ai) to fix them, and visualizes the entire workflow in Grafana Cloud.
+An event-driven pipeline that automatically identifies fixable issues from [apache/superset](https://github.com/apache/superset), mirrors them to a fork, dispatches [Devin.ai](https://devin.ai) to investigate and fix each one, and visualizes the entire workflow end-to-end in Grafana Cloud — with zero human intervention between alert and pull request.
 
-## Architecture
+---
+
+## How It Works
+
+```mermaid
+flowchart LR
+    A([apache/superset]) -->|AI-scored candidates| B[issue_scanner]
+    B -->|mirrors top 5| C([GitHub Fork])
+    C -->|open issue count| D[devin_exporter]
+    D -->|devin_pending_issues_total| E[Alloy]
+    E -->|remote_write| F[(Grafana Cloud\nPrometheus)]
+    F -->|alert: count > 0| G[Alert Rule]
+    G -->|POST /webhook| H[ngrok tunnel]
+    H --> I[webhook_server]
+    I -->|create session| J([Devin.ai API])
+    J -->|fix + PR + close issue| C
+    I -->|poll status every 10s| J
+    I -->|sessions.json| K[(session-data volume)]
+    D -->|reads sessions.json| K
+    D -->|/metrics| E
+```
+
+1. **Issue Scanner** fetches open issues from `apache/superset`, applies a keyword pre-filter, then scores the top candidates semantically with Claude AI. The top 5 are mirrored to your fork with idempotency (won't re-mirror the same upstream issue twice).
+
+2. **Devin Exporter** polls GitHub for open fork issues and cross-references the local session store to compute `devin_pending_issues_total` — open issues with no active Devin session. Alloy ships this metric to Grafana Cloud.
+
+3. **Grafana Cloud Alert** fires when `sum(devin_pending_issues_total) > 0` and sends a webhook to `webhook_server` via an ngrok tunnel.
+
+4. **Webhook Server** receives the alert, fetches all open fork issues, and calls the Devin API for any issue not already tracked in the session store. Two idempotency layers prevent duplicate sessions: an in-flight lock (within the process) and the persistent session store (across restarts).
+
+5. **Devin** clones the repo, investigates the issue, implements a minimal fix, opens a pull request with `Closes #N` in the description, and closes the fork issue directly.
+
+6. **Session polling** runs every 10 seconds, updating each session's status and PR URL in the store. As sessions complete and issues close, `devin_pending_issues_total` falls back to zero and the alert resolves.
+
+---
+
+## Tech Stack
+
+| Layer | Technology | Role |
+|-------|-----------|------|
+| **Issue Discovery** | Python + Claude (`claude-sonnet-4-6`) | Fetches and semantically scores apache/superset issues |
+| **Source Control** | GitHub REST API + GraphQL | Mirrors issues, tracks PRs, demo reset (issue deletion) |
+| **AI Agent** | [Devin.ai](https://devin.ai) v3 API | Autonomous code investigation, fix, and PR creation |
+| **Metrics** | Prometheus (custom exporter) | Exposes session state, PR counts, ACU consumption |
+| **Log + Metric Shipping** | [Grafana Alloy](https://grafana.com/oss/alloy/) | Tails structured JSON logs → Loki; remote_writes metrics → Prometheus |
+| **Observability Backend** | [Grafana Cloud](https://grafana.com/products/cloud/) | Prometheus, Loki, dashboards, alerting |
+| **Alert Trigger** | Grafana Alerting + PromQL | Evaluates `sum(devin_pending_issues_total) > 0` |
+| **Webhook Receiver** | FastAPI (Python) | Receives Grafana alerts, triggers Devin sessions |
+| **Tunnel** | [ngrok](https://ngrok.com) | Exposes local webhook_server to Grafana Cloud |
+| **Containerization** | Docker Compose | Orchestrates all services with shared volumes |
+
+---
+
+## Repository Structure
 
 ```
-Issue Scanner → GitHub Fork → Grafana GitHub datasource alert
-                                          ↓
-                             Webhook → webhook_server
-                                          ↓  fetches open issues from GitHub
-                                          ↓  cross-references session store
-                                      Devin.ai API
-                                          ↓
-                             Status/Logs → Grafana Cloud
+devin-autoremediation/
+├── issue_scanner/          # On-demand: AI-filters and mirrors superset issues to fork
+│   ├── scanner.py
+│   ├── github_client.py
+│   └── requirements.txt
+├── webhook_server/         # Always running: receives Grafana webhooks, triggers Devin
+│   ├── main.py
+│   ├── routes.py           # Webhook handler, session poller
+│   ├── devin_client.py     # Devin v3 API calls
+│   ├── session_store.py    # Persistent JSON session store
+│   ├── models.py
+│   └── requirements.txt
+├── devin_exporter/         # Always running: Prometheus metrics exporter
+│   ├── exporter.py         # DevinCollector — pipeline + v3 enterprise metrics
+│   ├── devin_client.py
+│   ├── github_client.py
+│   └── requirements.txt
+├── demo_reset/             # On-demand: wipes fork issues, PRs, branches, session store
+│   └── reset.py
+├── grafana_updater/        # One-shot on startup: patches Grafana contact point URL
+│   └── updater.py
+├── observability/
+│   ├── alloy/config.alloy  # Alloy pipeline: logs → Loki, metrics → Prometheus
+│   └── grafana/            # Dashboard JSON
+├── tests/                  # Webhook server unit tests (respx mocks, no real tokens)
+├── docker-compose.yml
+├── .env.example
+└── README.md
 ```
 
-1. **Issue Scanner** scans `apache/superset` for good candidate issues using a two-pass filter: keyword/label matching, then Claude AI semantic scoring. Top issues are mirrored to your fork.
-2. **Grafana Cloud** monitors the fork via the GitHub datasource. When open issues are detected, an alert fires a webhook.
-3. **Webhook Server** receives the alert, fetches open issues from GitHub directly, and calls the Devin API for any issues not already being handled.
-4. **Devin** receives the task, investigates the issue, implements a fix, opens a pull request (with `Closes #N` in the description), and closes the fork issue directly — no human intervention required.
-5. **Devin Exporter** exposes Prometheus metrics (session stats, PR counts, ACU consumption) for the Grafana Cloud dashboard.
+---
 
 ## Prerequisites
 
-- Docker + Docker Compose
-- GitHub personal access token (`repo` and `read:user` scopes) — `read:user` is required by the Grafana GitHub datasource to query issue authors
-- [Devin API key](https://app.devin.ai/settings/api) and your Devin org ID (format: `org-xxx`)
-- [Anthropic API key](https://console.anthropic.com)
-- [Grafana Cloud account](https://grafana.com/auth/sign-up) (free tier works)
-- [ngrok account](https://ngrok.com) + authtoken (free tier works)
-- Grafana service account token with Editor role — create at `https://<your-stack>.grafana.net` → Administration → Service accounts
+- **Docker + Docker Compose**
+- **GitHub personal access token** — scopes: `repo`, `read:user`, `delete_repo` (delete needed for GraphQL issue deletion in demo reset)
+- **[Devin API key](https://app.devin.ai/settings/api)** and your Devin org ID (`org-xxx` format)
+- **[Anthropic API key](https://console.anthropic.com)** — used by issue_scanner for AI scoring
+- **[Grafana Cloud account](https://grafana.com/auth/sign-up)** — free tier works
+- **[ngrok account](https://ngrok.com)** + authtoken — free tier works
+- **Grafana service account token** with Editor role — create at `https://<stack>.grafana.net` → Administration → Service accounts
 
-## Setup
+---
+
+## Quick Start
 
 ### 1. Fork apache/superset
 
-Fork [apache/superset](https://github.com/apache/superset) to your GitHub account. Note your fork's full name (e.g. `jonguay/superset`).
+Fork [apache/superset](https://github.com/apache/superset) to your GitHub account. Note the full name (e.g. `yourname/superset`).
 
-### 2. Configure environment
+### 2. Clone this repo and configure environment
 
 ```bash
+git clone https://github.com/yourname/devin-autoremediation
+cd devin-autoremediation
 cp .env.example .env
 ```
 
-Edit `.env` and fill in all values. See `.env.example` for descriptions. Key values:
+Fill in `.env`:
 
 | Variable | Where to find it |
 |----------|-----------------|
-| `GITHUB_TOKEN` | github.com → Settings → Developer settings → Personal access tokens |
+| `GITHUB_TOKEN` | GitHub → Settings → Developer settings → Personal access tokens |
+| `GITHUB_FORK_REPO` | Your fork, e.g. `yourname/superset` |
 | `DEVIN_API_KEY` | app.devin.ai → Settings → API |
 | `DEVIN_ORG_ID` | app.devin.ai → Settings → API (format: `org-xxx`) |
+| `ANTHROPIC_API_KEY` | console.anthropic.com |
 | `NGROK_AUTHTOKEN` | dashboard.ngrok.com → Your authtoken |
-| `GRAFANA_URL` | Your Grafana Cloud stack URL (e.g. `https://yourstack.grafana.net`) |
-| `GRAFANA_SA_TOKEN` | Grafana → Administration → Service accounts → Add token |
+| `GRAFANA_URL` | Your Grafana Cloud stack URL, e.g. `https://yourstack.grafana.net` |
+| `GRAFANA_SA_TOKEN` | Grafana → Administration → Service accounts → Add token (Editor role) |
+| `GRAFANA_CLOUD_PROMETHEUS_URL` | Grafana Cloud → Connections → your Prometheus details |
+| `GRAFANA_CLOUD_LOKI_URL` | Grafana Cloud → Connections → your Loki details |
 
-### 3. Configure Grafana Cloud data sources (one-time)
+### 3. Configure Grafana Cloud (one-time)
 
-**Add Prometheus and Loki data sources:**
-- Prometheus: use `GRAFANA_CLOUD_PROMETHEUS_URL` + username/API key from `.env`
-- Loki: use `GRAFANA_CLOUD_LOKI_URL` + username/API key from `.env`
+**Add data sources:**
+- **Prometheus**: use `GRAFANA_CLOUD_PROMETHEUS_URL` + username/API key from `.env`
+- **Loki**: use `GRAFANA_CLOUD_LOKI_URL` + username/API key from `.env`
 
-**Install and configure the GitHub datasource:**
-- Grafana Cloud → Connections → Add new connection → search "GitHub"
-- Install the plugin, add a datasource authenticated with your `GITHUB_TOKEN`
+**Import the dashboard:**
+- Grafana → Dashboards → Import → upload `observability/grafana/dashboard.json`
 
-**Import dashboard:**
-Import `observability/grafana/dashboard.json` into Grafana Cloud.
-
-> **Note:** The alert rule ("Open Issues in Fork") and webhook contact point ("devin-autoremediation") are pre-configured in Grafana Cloud. The contact point URL is automatically updated with the live ngrok URL each time you run `docker compose up`.
+> The Grafana alert rule and webhook contact point are pre-provisioned. The contact point URL is automatically patched with the live ngrok URL each time you run `docker compose up`.
 
 ### 4. Start the stack
 
@@ -75,95 +148,149 @@ Import `observability/grafana/dashboard.json` into Grafana Cloud.
 docker compose up -d
 ```
 
-This starts all services:
-- `webhook_server` (port 8000) — receives Grafana alerts, triggers Devin
-- `devin_exporter` (port 9090, localhost only) — Prometheus metrics
-- `alloy` — ships logs and metrics to Grafana Cloud
-- `ngrok` — creates a public HTTPS tunnel to `webhook_server`
-- `grafana_updater` — reads the live ngrok URL and updates the Grafana webhook contact point automatically, then exits
+Services started:
 
-## Running a Scan
+| Service | Port | Description |
+|---------|------|-------------|
+| `webhook_server` | `8000` | Receives Grafana alerts, triggers Devin |
+| `devin_exporter` | `9090` (localhost) | Prometheus metrics endpoint |
+| `alloy` | — | Ships logs → Loki, metrics → Prometheus |
+| `ngrok` | `4040` | Public HTTPS tunnel to webhook_server |
+| `grafana_updater` | — | Patches Grafana contact point URL, then exits |
+
+### 5. Run an issue scan
 
 ```bash
-docker compose --profile scan run issue_scanner
+docker compose --profile scan run --rm issue_scanner
 ```
 
-This fetches issues from `apache/superset`, scores them with Claude AI, and mirrors the top 5 to your fork. The Grafana Cloud GitHub datasource alert will detect the new open issues and fire within one evaluation cycle.
+This fetches issues from `apache/superset`, scores them with Claude AI, and mirrors the top 5 to your fork. Within one Grafana alert evaluation cycle (~1 minute), the alert fires and Devin sessions start automatically.
 
-## Demo Flow (5 minutes)
+---
 
-1. `docker compose up -d` — stack starts, ngrok tunnel opens, Grafana contact point is updated automatically
-2. Open Grafana Cloud dashboard — all metrics at zero, alert in Normal state
-3. Run `docker compose --profile scan run issue_scanner`
-4. Watch issues appear in fork — Grafana GitHub datasource detects open issue count > 0
-5. Alert fires → webhook → webhook server triggers a Devin session per issue
-6. Devin investigates, fixes the code, opens a PR with `Closes #N` in the description, then closes the fork issue directly
-7. Issue count drops to zero → alert resolves
-8. PR link and session status appear in the Grafana dashboard table panel
+## Demo Flow
+
+```
+docker compose up -d
+        │
+        ▼  grafana_updater patches contact point URL
+        │
+docker compose --profile scan run --rm issue_scanner
+        │
+        ▼  5 issues mirrored to fork
+        │
+Grafana evaluates sum(devin_pending_issues_total) > 0
+        │
+        ▼  alert fires → POST /webhook via ngrok
+        │
+webhook_server triggers 5 Devin sessions (one per issue)
+        │
+        ▼  Devin investigates, fixes, opens PRs, closes issues
+        │
+devin_pending_issues_total → 0  →  alert resolves
+        │
+        ▼
+Grafana dashboard shows sessions, statuses, PR links
+```
+
+**Expected timeline:** Issues appear in Grafana dashboard within ~2 minutes of scan. PRs typically opened by Devin within 10–30 minutes depending on issue complexity.
+
+---
+
+## Prometheus Metrics
+
+### Pipeline metrics (scoped to current run via `sessions.json`)
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `devin_pending_issues_total` | `issue_number`, `issue_url` | Open fork issues with no active Devin session — **alert trigger** |
+| `devin_session_total` | `status` | Session count by status (`new`, `running`, `exit`, `error`, …) |
+| `devin_session_duration_seconds` | `session_id`, `title`, `status` | Wall-clock duration per session |
+| `devin_session_acus_consumed` | `session_id`, `title`, `status` | ACUs consumed per session |
+| `devin_session_status_info` | `session_id`, `title`, `status`, `status_detail` | Info gauge (value=1) for current session state |
+| `devin_session_pr_info` | `session_id`, `title`, `issue_url`, `pr_url`, `status` | Info gauge (value=1) for sessions that produced a PR |
+| `devin_pr_created_total` | — | Total sessions that produced a pull request |
+
+### v3 Enterprise metrics (requires enterprise Devin plan)
+
+| Metric | Description |
+|--------|-------------|
+| `devin_usage_sessions_count` | Sessions started in window |
+| `devin_usage_prs_created_count` | PRs created in window |
+| `devin_usage_prs_merged_count` | PRs merged in window |
+| `devin_sessions_with_merged_prs_count` | Sessions that produced a merged PR |
+| `devin_avg_acus_per_session` | Average ACUs per session |
+| `devin_acus_consumed_total` | Total ACUs in window |
+| `devin_acus_by_product_latest` | ACUs by product on most recent day |
+
+---
+
+## Resetting for a Fresh Demo Run
+
+```bash
+docker compose --profile reset run --rm demo_reset
+docker compose restart webhook_server devin_exporter
+```
+
+The reset script:
+1. **Deletes** all mirrored issues from the fork via GitHub GraphQL (permanent deletion, not just closing)
+2. **Closes** any open Devin-created PRs and **deletes** their branches
+3. **Clears** `sessions.json` with an atomic write
+
+After restart, run the scanner again to begin a clean demo cycle. The same upstream issues will be mirrored as new issue numbers, with no idempotency collisions.
+
+> **Before resetting:** End any active Devin sessions from the Devin UI. The API does not support session termination, and running sessions may continue pushing to branches after reset.
+
+---
 
 ## Checking Status
 
 ```bash
-# Health check
+# Service health
 curl localhost:8000/health
 
-# View all tracked Devin sessions
+# All tracked Devin sessions
 curl localhost:8000/sessions | jq
 
-# View raw Prometheus metrics
-curl localhost:9090/metrics
+# Raw Prometheus metrics
+curl localhost:9090/metrics | grep devin_
 
-# View logs
+# Live logs
 docker compose logs -f webhook_server
 docker compose logs -f devin_exporter
+docker compose logs -f alloy
 ```
+
+---
 
 ## Testing
 
-Automated tests live under `tests/` and mock GitHub and Devin HTTP calls (no real tokens or network required for those cases). They target **`webhook_server`** only: `tests/conftest.py` sets dummy env vars and a temporary `SESSION_STORE_PATH`, and **`respx`** stubs outbound HTTP.
+Tests live in `tests/` and cover `webhook_server` only. All HTTP calls are mocked with `respx` — no real tokens or network needed.
 
-What they cover:
-
-- **`GET /health`** returns OK.
-- **`POST /webhook`** with no `firing` Grafana alerts does not call GitHub or Devin.
-- Invalid JSON body yields **400**; invalid webhook signature (when a secret is enforced in the test) yields **401**.
-- A **`firing`** alert triggers one mocked GitHub issues fetch and one mocked Devin session create; **`GET /sessions`** reflects the saved issue.
-- A second webhook for the same issue does **not** create a second Devin session (idempotency via the session store).
-
-Use a **virtual environment** so `pip` does not touch system Python (avoids `externally-managed-environment` on Debian/Ubuntu/WSL):
+**What's tested:**
+- `GET /health` → 200 OK
+- `POST /webhook` with no firing alerts → no GitHub or Devin calls made
+- Invalid JSON body → 400; invalid HMAC signature → 401
+- Firing alert → one GitHub issue fetch + one Devin session created; session appears in `GET /sessions`
+- Duplicate webhook for same issue → no second Devin session (idempotency)
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r webhook_server/requirements.txt -r requirements-dev.txt
 python -m pytest -c tests/pytest.ini -v
 ```
 
-If `python3 -m venv` fails, install the venv package (e.g. `sudo apt install python3-venv`) and retry.
-
-Configuration lives in **`tests/pytest.ini`** (`pythonpath` points at `webhook_server/` so imports match the Docker layout). Using **`-c tests/pytest.ini`** sets pytest’s root to `tests/` so paths stay consistent from the repo root.
-
-Alternatively, from **`tests/`**:
-
-```bash
-cd tests && python -m pytest -v
-```
-
-To run a single file or test from the repo root:
-
-```bash
-python -m pytest -c tests/pytest.ini tests/test_webhook.py -v
-python -m pytest -c tests/pytest.ini tests/test_webhook.py::test_webhook_firing_triggers_devin_for_open_issues -v
-```
+---
 
 ## Troubleshooting
 
-| Problem | Check |
-|---------|-------|
-| `externally-managed-environment` when using pip | Create and activate a **venv** (see **Testing**); do not install into system Python. |
-| No metrics in Grafana | `curl localhost:9090/metrics` — check Alloy logs: `docker compose logs alloy` |
-| Webhook not triggering | Check `docker compose logs grafana_updater` — the contact point URL may not have been set; verify ngrok is running with `docker compose logs ngrok` |
-| Contact point URL is stale | Restart the stack: `docker compose up -d` — `grafana_updater` sets the URL fresh on every startup |
-| GitHub datasource query errors | Verify `GITHUB_TOKEN` has both `repo` and `read:user` scopes |
-| No issues mirrored | Check scanner logs: `docker compose --profile scan logs issue_scanner`; verify `GITHUB_TOKEN` has fork write access |
+| Symptom | Resolution |
+|---------|-----------|
+| No metrics in Grafana | `curl localhost:9090/metrics` to verify exporter is up; `docker compose logs alloy` to check shipping |
+| Webhook not triggering | `docker compose logs grafana_updater` — contact point URL may not have been set; check `docker compose logs ngrok` |
+| Contact point URL stale after network change | `docker compose up -d` — `grafana_updater` re-patches on every startup |
+| Alert stays in Error state | Check alert rule query in Grafana — confirm `devin_pending_issues_total` exists in Prometheus |
+| No issues mirrored | `docker compose --profile scan logs issue_scanner`; verify `GITHUB_TOKEN` has `repo` write access to fork |
 | Devin session not created | Verify `DEVIN_API_KEY` and `DEVIN_ORG_ID`; check `curl localhost:8000/sessions` |
+| `externally-managed-environment` pip error | Use a venv (see Testing section); do not install into system Python |
+| `docker compose restart` doesn't pick up `.env` changes | Use `docker compose up -d --force-recreate` instead |

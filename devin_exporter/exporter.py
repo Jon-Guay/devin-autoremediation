@@ -126,6 +126,9 @@ class DevinCollector:
         open_issues = _cache.open_issues
         devin_sessions = _cache.devin_sessions
 
+        # Build lookup: session_id → API session object (for title + ACUs)
+        session_meta = {s["session_id"]: s for s in devin_sessions}
+
         active_issue_numbers = {
             str(s["issue_number"])
             for s in known
@@ -144,14 +147,17 @@ class DevinCollector:
                 )
         yield pending_family
 
+        # Count by status from known_sessions (session store) so counts reset cleanly
+        # when sessions.json is cleared between demo runs. The Devin API session list
+        # is unbounded and accumulates across resets, making it unsuitable for counters.
         status_counts: dict[str, int] = {}
-        for s in devin_sessions:
+        for s in known:
             st = s.get("status", "unknown")
             status_counts[st] = status_counts.get(st, 0) + 1
 
         session_total = GaugeMetricFamily(
             "devin_session_total",
-            "Devin sessions by status",
+            "Devin sessions by status (scoped to current demo run via session store)",
             labels=["status"],
         )
         for status, count in status_counts.items():
@@ -161,10 +167,12 @@ class DevinCollector:
         duration_family = GaugeMetricFamily(
             "devin_session_duration_seconds",
             "Duration of tracked Devin sessions in seconds",
-            labels=["session_id", "status"],
+            labels=["session_id", "title", "status"],
         )
         for rec in known:
             try:
+                meta = session_meta.get(rec["session_id"], {})
+                title = meta.get("title") or f"issue #{rec.get('issue_number', '?')}"
                 created = datetime.fromisoformat(
                     str(rec["created_at"]).replace("Z", "+00:00")
                 )
@@ -172,17 +180,73 @@ class DevinCollector:
                     str(rec["updated_at"]).replace("Z", "+00:00")
                 )
                 duration_family.add_metric(
-                    [rec["session_id"], rec.get("status", "unknown")],
+                    [rec["session_id"], title, rec.get("status", "unknown")],
                     (updated - created).total_seconds(),
                 )
             except Exception as e:
                 log.warning("duration_metric_parse_failed", session_id=rec.get("session_id"), error=str(e))
         yield duration_family
 
-        pr_count = sum(
-            1 for rec in known
-            if rec.get("pr_url") and rec.get("status") in {"finished", "exit"}
+        known_ids = {rec["session_id"] for rec in known}
+
+        acu_family = GaugeMetricFamily(
+            "devin_session_acus_consumed",
+            "ACUs consumed by each Devin session (scoped to current demo run)",
+            labels=["session_id", "title", "status"],
         )
+        for s in devin_sessions:
+            if s["session_id"] not in known_ids:
+                continue
+            acus = s.get("acus_consumed")
+            if acus is not None:
+                title = s.get("title") or s["session_id"]
+                acu_family.add_metric(
+                    [s["session_id"], title, s.get("status", "unknown")],
+                    float(acus),
+                )
+        yield acu_family
+
+        # Info-style gauge: value=1, strings carried in labels.
+        # status comes from known_sessions (polled every 10s via individual endpoints — accurate).
+        # status_detail comes from the API list (refreshed every 60s — best-effort).
+        status_info_family = GaugeMetricFamily(
+            "devin_session_status_info",
+            "Current status detail for each Devin session (scoped to current demo run)",
+            labels=["session_id", "title", "status", "status_detail"],
+        )
+        for rec in known:
+            meta = session_meta.get(rec["session_id"], {})
+            title = meta.get("title") or f"issue #{rec.get('issue_number', '?')}"
+            status_detail = meta.get("status_detail") or "unknown"
+            status_info_family.add_metric(
+                [rec["session_id"], title, rec.get("status", "unknown"), status_detail],
+                1.0,
+            )
+        yield status_info_family
+
+        pr_info_family = GaugeMetricFamily(
+            "devin_session_pr_info",
+            "Sessions that produced a pull request (1 = PR exists). Labels carry URLs for linking.",
+            labels=["session_id", "title", "issue_url", "pr_url", "status"],
+        )
+        pr_count = 0
+        for rec in known:
+            if rec.get("pr_url"):
+                pr_count += 1
+                meta = session_meta.get(rec["session_id"], {})
+                title = meta.get("title") or f"issue #{rec.get('issue_number', '?')}"
+                pr_info_family.add_metric(
+                    [
+                        rec["session_id"],
+                        title,
+                        rec.get("issue_url", ""),
+                        rec["pr_url"],
+                        rec.get("status", "unknown"),
+                    ],
+                    1.0,
+                )
+        yield pr_info_family
+
         pr_family = GaugeMetricFamily(
             "devin_pr_created_total",
             "Devin sessions that produced a pull request",

@@ -51,11 +51,14 @@ Begin now."""
 
 
 async def create_session(issue: GitHubIssue) -> DevinSession:
+    raw_title = f"[auto] #{issue.number}: {issue.title}"
+    title = raw_title[:97] + "..." if len(raw_title) > 100 else raw_title
     r = await _http.post(
         f"{BASE_URL}/organizations/{ORG_ID}/sessions",
         json={
             "prompt": build_prompt(issue),
             "repos": [f"https://github.com/{FORK_REPO}"],
+            "title": title,
         },
     )
     r.raise_for_status()

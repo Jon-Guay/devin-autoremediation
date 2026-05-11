@@ -142,7 +142,8 @@ async def poll_sessions() -> None:
             try:
                 status = await devin_client.get_session(rec.session_id)
                 pr_url = (
-                    status.pull_requests[0].get("url") if status.pull_requests else None
+                    status.pull_requests[0].get("pr_url") or status.pull_requests[0].get("url")
+                    if status.pull_requests else None
                 )
                 await store.update_status(rec.session_id, status.status, pr_url)
                 log.info(

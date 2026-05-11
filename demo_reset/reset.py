@@ -8,6 +8,7 @@ Run between demo recordings for a fully clean slate:
     docker compose --profile reset run demo_reset
 """
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -108,15 +109,40 @@ async def close_pr_and_delete_branch(pr: dict) -> None:
 
 def clear_session_store() -> None:
     path = Path(SESSION_STORE_PATH)
-    if path.exists():
-        path.write_text("{}")
-        log.info("session_store_cleared", path=str(path))
-    else:
-        log.info("session_store_not_found_skipping", path=str(path))
+    # Atomic write: matches the pattern used by the webhook server so concurrent
+    # writes don't corrupt the file.
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("[]")
+    tmp.rename(path)
+    log.info("session_store_cleared", path=str(path))
+
+
+async def get_running_sessions() -> list[dict]:
+    """Check session store for sessions still in a non-terminal state."""
+    path = Path(SESSION_STORE_PATH)
+    if not path.exists():
+        return []
+    try:
+        sessions = json.loads(path.read_text())
+        terminal = {"exit", "error", "suspended", "finished", "blocked", "expired"}
+        return [s for s in sessions if s.get("status") not in terminal]
+    except Exception:
+        return []
 
 
 async def main() -> None:
     log.info("demo_reset_start", repo=FORK_REPO)
+
+    # Warn if Devin sessions are still active — they can't be stopped via API
+    # and may continue creating PRs on the fork after reset.
+    running = await get_running_sessions()
+    if running:
+        log.warning(
+            "active_sessions_at_reset",
+            count=len(running),
+            session_ids=[s.get("session_id", "?")[:12] for s in running],
+            note="Devin sessions cannot be stopped via API and may continue working after reset.",
+        )
 
     # 1. Delete all mirrored issues via GraphQL
     issues = await get_mirrored_issues()
@@ -132,13 +158,14 @@ async def main() -> None:
         await close_pr_and_delete_branch(pr)
         await asyncio.sleep(0.5)
 
-    # 3. Clear session store
+    # 3. Clear session store (atomic write to avoid racing with webhook_server)
     clear_session_store()
 
     log.info(
         "demo_reset_complete",
         issues_deleted=len(issues),
         prs_closed=len(prs),
+        note="Run 'docker compose restart webhook_server devin_exporter' to flush in-memory state.",
     )
 
 
