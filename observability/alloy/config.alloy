@@ -23,9 +23,20 @@ discovery.docker "containers" {
   host = "unix:///var/run/docker.sock"
 }
 
+// Extract Docker Compose service name as service_name label so logs from
+// each service are queryable independently in Loki.
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service_name"
+  }
+}
+
 loki.source.docker "containers" {
   host       = "unix:///var/run/docker.sock"
-  targets    = discovery.docker.containers.targets
+  targets    = discovery.relabel.containers.output
   forward_to = [loki.write.grafana_cloud.receiver]
 }
 
