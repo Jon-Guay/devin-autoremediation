@@ -7,21 +7,41 @@ An event-driven pipeline that automatically identifies fixable issues from [apac
 ## How It Works
 
 ```mermaid
-flowchart LR
-    A([apache/superset]) -->|AI-scored candidates| B[issue_scanner]
-    B -->|mirrors top 5| C([GitHub Fork])
-    C -->|open issue count| D[devin_exporter]
-    D -->|devin_pending_issues_total| E[Alloy]
-    E -->|remote_write| F[(Grafana Cloud\nPrometheus)]
-    F -->|alert: count > 0| G[Alert Rule]
-    G -->|POST /webhook| H[ngrok tunnel]
-    H --> I[webhook_server]
-    I -->|create session| J([Devin.ai API])
-    J -->|fix + PR + close issue| C
-    I -->|poll status every 10s| J
-    I -->|sessions.json| K[(session-data volume)]
-    D -->|reads sessions.json| K
-    D -->|/metrics| E
+flowchart TD
+    SUP([apache/superset])
+    FORK([GitHub Fork])
+    DEVIN([Devin.ai])
+
+    subgraph local["Local  ·  Docker Compose"]
+        SCAN[issue_scanner]
+        EXP[devin_exporter]
+        WH[webhook_server]
+        ALLOY[Grafana Alloy]
+        STORE[(sessions.json)]
+    end
+
+    subgraph gc["Grafana Cloud"]
+        PROM[(Prometheus)]
+        LOKI[(Loki)]
+        ALERT{Alert Rule}
+        DASH[Dashboard]
+    end
+
+    SUP -->|"① AI-score & filter"| SCAN
+    SCAN -->|"② mirror top 5"| FORK
+    FORK -->|open issues| EXP
+    STORE -->|known session IDs| EXP
+    EXP -->|metrics| ALLOY
+    EXP -->|structured JSON logs| ALLOY
+    ALLOY -->|remote_write| PROM
+    ALLOY -->|log push| LOKI
+    PROM & LOKI --> DASH
+    PROM -->|"③ sum(pending) > 0"| ALERT
+    ALERT -->|"④ POST /webhook via ngrok"| WH
+    WH -->|"⑤ create session"| DEVIN
+    WH -->|write session record| STORE
+    WH -.->|poll status every 10s| DEVIN
+    DEVIN -->|"⑥ fix · PR · close issue"| FORK
 ```
 
 1. **Issue Scanner** fetches open issues from `apache/superset`, applies a keyword pre-filter, then scores the top candidates semantically with Claude AI. The top 5 are mirrored to your fork with idempotency (won't re-mirror the same upstream issue twice).
