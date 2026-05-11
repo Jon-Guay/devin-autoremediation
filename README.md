@@ -100,8 +100,7 @@ devin-autoremediation/
 ├── grafana_updater/        # One-shot on startup: patches Grafana contact point URL
 │   └── updater.py
 ├── observability/
-│   ├── alloy/config.alloy  # Alloy pipeline: logs → Loki, metrics → Prometheus
-│   └── grafana/            # Dashboard JSON
+│   └── alloy/config.alloy  # Alloy pipeline: logs → Loki, metrics → Prometheus
 ├── tests/                  # Webhook server unit tests (respx mocks, no real tokens)
 ├── docker-compose.yml
 ├── .env.example
@@ -157,10 +156,7 @@ Fill in `.env`:
 - **Prometheus**: use `GRAFANA_CLOUD_PROMETHEUS_URL` + username/API key from `.env`
 - **Loki**: use `GRAFANA_CLOUD_LOKI_URL` + username/API key from `.env`
 
-**Import the dashboard:**
-- Grafana → Dashboards → Import → upload `observability/grafana/dashboard.json`
-
-> The Grafana alert rule and webhook contact point are pre-provisioned. The contact point URL is automatically patched with the live ngrok URL each time you run `docker compose up`.
+> The Grafana alert rule and webhook contact point are pre-provisioned in your Grafana Cloud stack. The contact point URL is automatically patched with the live ngrok URL each time you run `docker compose up`. The dashboard is managed directly in Grafana Cloud and is not included in this repo.
 
 ### 4. Start the stack
 
