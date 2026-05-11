@@ -13,6 +13,14 @@ services:
     env_file: .env
     networks: [autoremediation-net]
 
+  demo_reset:
+    build: ./demo_reset
+    profiles: ["reset"]
+    env_file: .env
+    volumes:
+      - session-data:/data
+    networks: [autoremediation-net]
+
   webhook_server:
     build: ./webhook_server
     restart: always
@@ -32,6 +40,29 @@ services:
     volumes:
       - session-data:/data
     networks: [autoremediation-net]
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    command: http webhook_server:8000 --log stdout
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    ports:
+      - "4040:4040"
+    networks: [autoremediation-net]
+    depends_on:
+      - webhook_server
+
+  grafana_updater:
+    image: python:3.12-slim
+    command: sh -c "pip install -q httpx && python /scripts/update_grafana_webhook.py"
+    volumes:
+      - ./scripts:/scripts:ro
+    env_file: .env
+    networks: [autoremediation-net]
+    restart: "no"
+    depends_on:
+      - ngrok
 
   alloy:
     image: grafana/alloy:latest
