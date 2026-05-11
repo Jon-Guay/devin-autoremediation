@@ -17,7 +17,9 @@ async def list_sessions() -> list[dict]:
     r = await _http.get(f"{BASE_URL}/organizations/{ORG_ID}/sessions")
     r.raise_for_status()
     data = r.json()
-    return data.get("sessions", data) if isinstance(data, dict) else data
+    if isinstance(data, dict):
+        return data.get("sessions") or data.get("items") or []
+    return data
 
 
 async def _v3_get(path: str, params: dict) -> Optional[dict]:
