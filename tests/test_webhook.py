@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import patch
 
 import httpx
@@ -12,6 +13,8 @@ from starlette.testclient import TestClient
 
 import routes
 from main import app
+
+DEVIN_V3_SESSIONS = "https://api.devin.ai/v3/organizations/org-test/sessions"
 
 
 @pytest.fixture
@@ -39,7 +42,7 @@ def test_webhook_no_firing_alerts_skips_downstream(client: TestClient) -> None:
         gh = respx.get(url__regex=r"https://api\.github\.com/repos/.+/issues(\?.*)?$").mock(
             return_value=httpx.Response(200, json=[])
         )
-        dv = respx.post("https://api.devin.ai/v1/sessions").mock(
+        dv = respx.post(DEVIN_V3_SESSIONS).mock(
             return_value=httpx.Response(200, json={"session_id": "x", "url": "y"})
         )
         r = client.post("/webhook", json=payload)
@@ -91,13 +94,13 @@ def test_webhook_firing_triggers_devin_for_open_issues(client: TestClient) -> No
             ],
         )
     )
-    dv = respx.post("https://api.devin.ai/v1/sessions").mock(
+    dv = respx.post(DEVIN_V3_SESSIONS).mock(
         return_value=httpx.Response(
             200,
             json={
                 "session_id": "sess_abc",
                 "url": "https://app.devin.ai/sessions/sess_abc",
-                "is_new_session": True,
+                "status": "new",
             },
         )
     )
@@ -128,13 +131,13 @@ def test_webhook_idempotent_skips_second_devin_call(client: TestClient) -> None:
     respx.get(url__regex=r"https://api\.github\.com/repos/test/test/issues(\?.*)?$").mock(
         return_value=httpx.Response(200, json=issue_json)
     )
-    dv = respx.post("https://api.devin.ai/v1/sessions").mock(
+    dv = respx.post(DEVIN_V3_SESSIONS).mock(
         return_value=httpx.Response(
             200,
             json={
                 "session_id": "sess_one",
                 "url": "https://app.devin.ai/sessions/sess_one",
-                "is_new_session": True,
+                "status": "new",
             },
         )
     )

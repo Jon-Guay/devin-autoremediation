@@ -33,7 +33,7 @@ SCRAPE_PORT = int(os.getenv("EXPORTER_PORT", "9090"))
 REFRESH_INTERVAL = int(os.getenv("EXPORTER_REFRESH_INTERVAL", "60"))
 METRICS_WINDOW_DAYS = int(os.getenv("DEVIN_METRICS_WINDOW_DAYS", "30"))
 
-TERMINAL_STATUSES = {"finished", "blocked", "expired"}
+TERMINAL_STATUSES = {"exit", "error", "suspended", "finished", "blocked", "expired"}
 
 
 class _Cache:
@@ -146,7 +146,7 @@ class DevinCollector:
 
         status_counts: dict[str, int] = {}
         for s in devin_sessions:
-            st = s.get("status_enum", "unknown")
+            st = s.get("status", "unknown")
             status_counts[st] = status_counts.get(st, 0) + 1
 
         session_total = GaugeMetricFamily(
@@ -181,7 +181,7 @@ class DevinCollector:
 
         pr_count = sum(
             1 for rec in known
-            if rec.get("pr_url") and rec.get("status") == "finished"
+            if rec.get("pr_url") and rec.get("status") in {"finished", "exit"}
         )
         pr_family = GaugeMetricFamily(
             "devin_pr_created_total",

@@ -28,11 +28,10 @@ class GitHubIssue(BaseModel):
 class DevinSession(BaseModel):
     session_id: str
     url: str
-    is_new_session: bool = True
 
 
 class DevinSessionStatus(BaseModel):
     session_id: str
-    status_enum: str
-    pull_request: Optional[dict] = None
-    updated_at: str = ""
+    status: str
+    pull_requests: list[dict] = []
+    updated_at: int = 0

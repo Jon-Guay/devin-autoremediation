@@ -28,7 +28,7 @@ services:
     restart: always
     env_file: .env
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - session-data:/data
     networks: [autoremediation-net]

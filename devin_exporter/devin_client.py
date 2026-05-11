@@ -4,8 +4,8 @@ from typing import Optional
 import httpx
 
 DEVIN_API_KEY = os.environ["DEVIN_API_KEY"]
-BASE_URL = "https://api.devin.ai/v1"
-V3_BASE_URL = "https://api.devin.ai/v3"
+ORG_ID = os.environ["DEVIN_ORG_ID"]
+BASE_URL = "https://api.devin.ai/v3"
 
 _http = httpx.AsyncClient(
     timeout=30,
@@ -14,14 +14,15 @@ _http = httpx.AsyncClient(
 
 
 async def list_sessions() -> list[dict]:
-    r = await _http.get(f"{BASE_URL}/sessions")
+    r = await _http.get(f"{BASE_URL}/organizations/{ORG_ID}/sessions")
     r.raise_for_status()
-    return r.json().get("sessions", [])
+    data = r.json()
+    return data.get("sessions", data) if isinstance(data, dict) else data
 
 
 async def _v3_get(path: str, params: dict) -> Optional[dict]:
     """GET a v3 enterprise endpoint; returns None on 401/403 (insufficient permissions)."""
-    r = await _http.get(f"{V3_BASE_URL}/{path}", params=params)
+    r = await _http.get(f"{BASE_URL}/{path}", params=params)
     if r.status_code in (401, 403):
         return None
     r.raise_for_status()

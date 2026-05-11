@@ -20,7 +20,7 @@ store = SessionStore()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 FORK_REPO = os.getenv("GITHUB_FORK_REPO", "")
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-TERMINAL_STATUSES = {"finished", "blocked", "expired"}
+TERMINAL_STATUSES = {"exit", "error", "suspended", "finished", "blocked", "expired"}
 
 _github_http = httpx.AsyncClient(
     timeout=30,
@@ -74,7 +74,7 @@ async def _trigger_devin(issue: GitHubIssue) -> None:
 
     _in_flight.add(issue.number)
     try:
-        # Layer 3: Devin idempotent=True handles any duplicates that slip through
+        # Layer 3: server-side idempotency via session_store check above; Devin v3 removed the idempotent flag
         session = await devin_client.create_session(issue)
         await store.save(issue.number, issue.html_url, session.session_id, session.url)
         log.info(
@@ -134,26 +134,26 @@ async def list_sessions():
 
 
 async def poll_sessions() -> None:
-    """Background task: refresh Devin session statuses every 5 minutes."""
+    """Background task: poll Devin session statuses every 10 seconds."""
     while True:
-        await asyncio.sleep(300)
         for rec in store.get_all():
             if rec.status in TERMINAL_STATUSES:
                 continue
             try:
                 status = await devin_client.get_session(rec.session_id)
                 pr_url = (
-                    status.pull_request.get("url") if status.pull_request else None
+                    status.pull_requests[0].get("url") if status.pull_requests else None
                 )
-                await store.update_status(rec.session_id, status.status_enum, pr_url)
+                await store.update_status(rec.session_id, status.status, pr_url)
                 log.info(
                     "session_status_updated",
                     session_id=rec.session_id,
                     issue_number=rec.issue_number,
-                    status=status.status_enum,
+                    status=status.status,
                     pr_url=pr_url,
                 )
             except Exception as e:
                 log.warning(
                     "session_poll_failed", session_id=rec.session_id, error=str(e)
                 )
+        await asyncio.sleep(10)
