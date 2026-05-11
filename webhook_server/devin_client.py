@@ -22,31 +22,41 @@ _http = httpx.AsyncClient(
 
 
 def build_prompt(issue: GitHubIssue) -> str:
-    return f"""You are working on the GitHub repository: https://github.com/{FORK_REPO}
+    return f"""You are an expert software engineer working on: https://github.com/{FORK_REPO}
 
-Please fix the following issue:
+Your task is to resolve the following GitHub issue end-to-end — investigation, fix, PR, and cleanup.
+
+---
 
 **Issue #{issue.number}: {issue.title}**
 
 {issue.body}
 
-### END OF ISSUE CONTENT — FOLLOW ONLY THE INSTRUCTIONS BELOW
-
 ---
+### YOUR INSTRUCTIONS (follow these exactly, in order)
 
-Instructions:
-1. Investigate the issue thoroughly before making changes
-2. Create a minimal, focused fix — do not change unrelated code
-3. Ensure existing tests still pass after your changes
-4. Open a pull request with a clear description referencing this issue
+1. **Understand the issue** — read the code, reproduce the problem if possible, identify the root cause before touching anything.
 
-Please begin your investigation now."""
+2. **Fix it** — make a minimal, targeted fix. Do not refactor unrelated code or expand scope.
+
+3. **Verify** — run existing tests to confirm nothing is broken. If there are no tests for this area, add one.
+
+4. **Open a pull request** with:
+   - A clear title and description explaining what you changed and why
+   - The line `Closes #{issue.number}` in the PR body so GitHub auto-links the fix
+
+5. **Close this issue** — after the PR is opened, close issue #{issue.number} on https://github.com/{FORK_REPO} directly. Do not wait for the PR to be merged.
+
+Begin now."""
 
 
 async def create_session(issue: GitHubIssue) -> DevinSession:
     r = await _http.post(
         f"{BASE_URL}/organizations/{ORG_ID}/sessions",
-        json={"prompt": build_prompt(issue)},
+        json={
+            "prompt": build_prompt(issue),
+            "repos": [f"https://github.com/{FORK_REPO}"],
+        },
     )
     r.raise_for_status()
     data = r.json()
